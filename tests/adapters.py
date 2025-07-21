@@ -588,4 +588,75 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
+    # parallel chunks
+    def find_chunk_boundaries(
+            file: BinaryIO,
+            desired_num_chunks: int,
+            special_split_token: bytes
+    ) -> list[int]:
+        
+        file.seek(0, os.SEEK_END)
+        file_size = file.tell()
+        file.seek(0)
+
+        chunk_size = file_size // desired_num_chunks
+        mini_chunk_size = 4096
+
+        chunk_boundaries = []
+        for i in range(0, desired_num_chunks+1):
+            chunk_boundaries.append(chunk_size*i)
+        chunk_boundaries[-1] = file_size
+
+        for i in range(1, desired_num_chunks-1):
+            inital_position = chunk_boundaries[i]
+            file.seek(inital_position)
+            while True:
+                mini_chunk = file.read(mini_chunk_size)
+
+                if mini_chunk == b"":
+                    chunk_boundaries[i] = file_size
+                    break
+                
+                found_at = mini_chunk.find(special_split_token)
+                if found_at != -1:
+                    chunk_boundaries[i] = inital_position + found_at
+                    break
+
+                inital_position += mini_chunk_size
+
+        return sorted(set(chunk_boundaries))
+
+    desired_num_chunks = 8
+    special_split_token = "<|endoftext|>".encode("utf-8")
+    with open(input_path, 'rb') as f:
+        chunk_boundaries = find_chunk_boundaries(f, desired_num_chunks, special_split_token)
+        chunks = [f.read(bi) for bi in chunk_boundaries[1:]]
+    
+    vocab = {i: bytes([i]) for i in range(256)}
+    merge_count = {}
+    for chunk in chunks:
+        while len(merge_count != vocab_size):
+            for pre, latter in zip(chunk[:-1], chunk[1:]):
+                if (pre, latter) not in merge_count:
+                    merge_count[(pre, latter)] = 0
+                merge_count[(pre, latter)] += 1
+            
+            max_count = 0
+            max_vab = (b'',b'')
+            for k, v in merge_count.items():
+                if v > max_count or (k == max_vab and k > max_vab):
+                    max_count = v
+                    max_vab = k
+            vocab[len(vocab)+1] = max_vab[0]+max_vab[1]
+                                 
+
+
+
+
+        break
+    
+    
+
+    
+
     raise NotImplementedError

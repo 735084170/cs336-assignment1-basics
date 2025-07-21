@@ -1,4 +1,5 @@
 import os
+import re
 from typing import BinaryIO
 
 def find_chunk_boundaries(
@@ -49,14 +50,23 @@ def find_chunk_boundaries(
     # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
     return sorted(set(chunk_boundaries))
 
+num_processes = 4  # Example number of processes
+special_tokens = ["<|endoftext|>", "<|startoftext|>", "<|pad|>"]
+escaped_special_tokens = [re.escape(token) for token in special_tokens]
+
 ## Usage
-with open(..., "rb") as f:
+with open('data/TinyStoriesV2-GPT4-valid.txt', "rb") as f:
     boundaries = find_chunk_boundaries(
         f, num_processes, "<|endoftext|>".encode("utf-8"))
         
     # The following is a serial implementation, but you can parallelize this 
     # by sending each start/end pair to a set of processes.
+    combined_pattern = '|'.join(escaped_special_tokens)
+    print(f"Regex pattern: {combined_pattern}")
     for start, end in zip(boundaries[:-1], boundaries[1:]):
         f.seek(start)
         chunk = f.read(end - start).decode("utf-8", errors="ignore")
         # Run pre-tokenization on your chunk and store the counts for each pre-token
+        parts = re.split(combined_pattern, chunk)
+        for part in parts:
+            print(f"Part: {part}")

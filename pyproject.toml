@@ -30,6 +30,12 @@ include = ["cs336_basics"]
 package = true
 python-preference = "managed"
 
+[tool.uv.workspace]
+members = [
+    "helloworad",
+    "helloworld2",
+]
+
 [tool.pytest.ini_options]
 log_cli = true
 log_cli_level = "WARNING"
