@@ -1,6 +1,8 @@
 import os
 from typing import IO, Any, BinaryIO
 from tqdm import tqdm
+# import re
+import regex as re
 
 def run_train_bpe(
     input_path: str | os.PathLike,
@@ -66,12 +68,21 @@ def run_train_bpe(
                 inital_position += mini_chunk_size
 
         return sorted(set(chunk_boundaries))
+    
+
+    def pre_tokenization(chunk: bytes):
+        pat = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+        text_chunk = chunk.decode("utf-8")
+        blocks = re.findall(pat, text_chunk)
+        bytes_blocks = [block.encode("utf-8") for block in blocks]
+        return bytes_blocks
+
 
     desired_num_chunks = 1000
     special_split_token = "<|endoftext|>".encode("utf-8")
     with open(input_path, 'rb') as f:
         chunk_boundaries = find_chunk_boundaries(f, desired_num_chunks, special_split_token)
-        print(chunk_boundaries)
+        # print(chunk_boundaries)
         
         chunks = []
         for i in range(len(chunk_boundaries)-1):
@@ -84,10 +95,13 @@ def run_train_bpe(
     vocab = {i: bytes([i]) for i in range(256)}
     merge_count = {}
     for chunk in chunks:
+        blocks = pre_tokenization(chunk)
         print(chunk[:50])
         while len(vocab) < vocab_size:
+            for block in blocks:
+                print(block)
 
-            
+
             for pre, latter in tqdm(zip(chunk[:-1], chunk[1:])):
                 pre = bytes([pre])
                 latter = bytes([latter])
