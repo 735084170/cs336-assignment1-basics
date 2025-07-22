@@ -69,7 +69,6 @@ def run_train_bpe(
 
         return sorted(set(chunk_boundaries))
     
-
     def pre_tokenization(chunk: bytes) -> list[bytes]:
         pat = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
         text_chunk = chunk.decode("utf-8")
@@ -84,12 +83,50 @@ def run_train_bpe(
             vocab_blocks.append(vocab_block)
         return vocab_blocks
 
-    desired_num_chunks = 1000
+   
+    def count_from_chunks(token_group_list: list):
+        merge_count = {}
+
+        for token_group in token_group_list:
+            for i in range(len(token_group)-1):
+                pre = token_group[i]
+                latter = token_group[i+1]
+                if (pre, latter) not in merge_count:
+                    merge_count[(pre, latter)] = 0
+                merge_count[(pre, latter)] += 1
+        return merge_count
+    
+    def update_token_group_list(token_group_list):
+        # vocab增加新的合并项，重新处理token_group_list
+        update_token_group_list =[]
+        for token_group in token_group_list:
+            update_token_group = []
+            if len(token_group) == 1:
+                update_token_group = token_group
+            else:
+                idx = 0
+                while idx < len(token_group):
+                    if idx == len(token_group)-1:
+                        update_token_group.append(token_group[idx])
+                        break
+                    pre = token_group[idx]
+                    latter = token_group[idx+1]
+                    if pre == max_vab[0] and latter == max_vab[1]:
+                        update_token_group.append(max_vab[0]+max_vab[1])
+                        idx += 2
+                    else:
+                        update_token_group.append(pre)
+                        idx += 1
+            update_token_group_list.append(update_token_group)
+        
+        return update_token_group_list
+
+    desired_num_chunks = 8
     special_split_token = "<|endoftext|>".encode("utf-8")
+
+    # split the corpus to chunk for parallel
     with open(input_path, 'rb') as f:
         chunk_boundaries = find_chunk_boundaries(f, desired_num_chunks, special_split_token)
-        # print(chunk_boundaries)
-        
         chunks = []
         for i in range(len(chunk_boundaries)-1):
             start_pos = chunk_boundaries[i]
@@ -98,41 +135,31 @@ def run_train_bpe(
             f.seek(start_pos)
             chunk = f.read(chunk_size)
             chunks.append(chunk)
+
+    # initial the vocab 
     vocab = {i: bytes([i]) for i in range(256)}
-    merge_count = {}
+    vocab[256] = special_split_token
+
     for chunk in chunks:
-        blocks = pre_tokenization(chunk)
-        vocabs =  convert_to_vocab(blocks)
-        print(chunk[:50])
-        while len(vocab) < vocab_size:
-            for block, vocab_in_block in zip(blocks, vocabs):
-                for i in range(len(vocab_in_block)-1):
-                    pre = vocab_in_block[i]
-                    latter = vocab_in_block[i+1]
-                    if (pre, latter) not in merge_count:
-                        merge_count[(pre, latter)] = 0
-                    merge_count[(pre, latter)] += 1
+        # pre tokenization, split the chunk into words
+        words = pre_tokenization(chunk)
+        # split the words into token
+        token_group_list = convert_to_vocab(words)
+        for _ in tqdm(range(vocab_size-len(vocab))):
+            # count merge
+            merge_count = count_from_chunks(token_group_list)
 
-
+            # get the new merge vocab
             max_count = 0
             max_vab = (bytes([0]),bytes([0]))
             for k, v in merge_count.items():
-                if v > max_count or (k == max_vab and k > max_vab):
+                if v > max_count or (v == max_count and k > max_vab):
                     max_count = v
                     max_vab = k
-            print(merge_count)
-            print(max_vab)
-            print(type(max_vab[0]))
             vocab[len(vocab)] = max_vab[0] + max_vab[1]
-
-            # 合并新的vocab
-            for block, vocab_in_block in zip(blocks, vocabs):
-                for i in range(len(vocab_in_block)-1):
-                    pre = vocab_in_block[i]
-                    latter = vocab_in_block[i+1]
-                    if (pre, latter) not in merge_count:
-                        merge_count[(pre, latter)] = 0
-                    merge_count[(pre, latter)] += 1
+            
+            # update base on the new vocab
+            token_group_list = update_token_group_list(token_group_list)
 
 
 
@@ -141,5 +168,5 @@ def run_train_bpe(
 
 run_train_bpe(
     'data/TinyStoriesV2-GPT4-valid.txt',
-    258,
+    500,
     [])
