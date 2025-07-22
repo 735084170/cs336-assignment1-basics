@@ -70,13 +70,19 @@ def run_train_bpe(
         return sorted(set(chunk_boundaries))
     
 
-    def pre_tokenization(chunk: bytes):
+    def pre_tokenization(chunk: bytes) -> list[bytes]:
         pat = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
         text_chunk = chunk.decode("utf-8")
         blocks = re.findall(pat, text_chunk)
         bytes_blocks = [block.encode("utf-8") for block in blocks]
         return bytes_blocks
 
+    def convert_to_vocab(blocks: list[bytes]):
+        vocab_blocks = []
+        for block in blocks:
+            vocab_block = [bytes([byte]) for byte in block]
+            vocab_blocks.append(vocab_block)
+        return vocab_blocks
 
     desired_num_chunks = 1000
     special_split_token = "<|endoftext|>".encode("utf-8")
@@ -96,18 +102,16 @@ def run_train_bpe(
     merge_count = {}
     for chunk in chunks:
         blocks = pre_tokenization(chunk)
+        vocabs =  convert_to_vocab(blocks)
         print(chunk[:50])
         while len(vocab) < vocab_size:
-            for block in blocks:
-                print(block)
-
-
-            for pre, latter in tqdm(zip(chunk[:-1], chunk[1:])):
-                pre = bytes([pre])
-                latter = bytes([latter])
-                if (pre, latter) not in merge_count:
-                    merge_count[(pre, latter)] = 0
-                merge_count[(pre, latter)] += 1
+            for block, vocab_in_block in zip(blocks, vocabs):
+                for i in range(len(vocab_in_block)-1):
+                    pre = vocab_in_block[i]
+                    latter = vocab_in_block[i+1]
+                    if (pre, latter) not in merge_count:
+                        merge_count[(pre, latter)] = 0
+                    merge_count[(pre, latter)] += 1
 
 
             max_count = 0
@@ -116,9 +120,19 @@ def run_train_bpe(
                 if v > max_count or (k == max_vab and k > max_vab):
                     max_count = v
                     max_vab = k
+            print(merge_count)
+            print(max_vab)
+            print(type(max_vab[0]))
             vocab[len(vocab)] = max_vab[0] + max_vab[1]
-                                 
 
+            # 合并新的vocab
+            for block, vocab_in_block in zip(blocks, vocabs):
+                for i in range(len(vocab_in_block)-1):
+                    pre = vocab_in_block[i]
+                    latter = vocab_in_block[i+1]
+                    if (pre, latter) not in merge_count:
+                        merge_count[(pre, latter)] = 0
+                    merge_count[(pre, latter)] += 1
 
 
 
@@ -126,6 +140,6 @@ def run_train_bpe(
     print(vocab)
 
 run_train_bpe(
-    '/home/ubuntu/liyang/cs336/cs336-assignment1-basics/data/TinyStoriesV2-GPT4-valid.txt',
-    300,
+    'data/TinyStoriesV2-GPT4-valid.txt',
+    258,
     [])
