@@ -18,6 +18,71 @@ TokenGroup = list[Token]
 TokenGroupList = list[TokenGroup]
 TokenGroupBatch = list[TokenGroupList]
 
+class _Node:
+    __slots__ = ("val", "prev", "next")
+    def __init__(self, val=None):
+        self.val = val
+        self.prev = self.next = None
+
+class DoublyLinkedList:
+    def __init__(self):
+        self.head, self.tail = _Node(), _Node()
+        self.head.next, self.tail.prev = self.tail, self.head
+
+    def append_tail(self, node):
+        last = self.tail.prev
+        last.next = self.tail.prev = node
+        node.prev = node.next = last, self.tail
+    
+    def remove(node):
+        node.prev.next, node.next.prev = node.next, node.prev
+
+    def pop_head(self):
+        if self.head.next is self.tail:
+            return None
+        node = self.head.next
+        self.remove(node)
+        return node
+
+class IndexLinkedList:
+    def __init__(self):
+        self.map = {}
+        self.dll = DoublyLinkedList()
+    
+    def put(self, val):
+        node = _Node(val)
+        self.dll.append_tail(node)
+        if val not in self.map:
+            self.map[val] = []
+        self.map[val].append(node)
+
+    def get_nodes_by_value(self, val):
+        return self.map[val]
+    
+    def merge_vocab(self, first_val, second_val):
+        res = []
+        first_list = self.map[first_val]
+        for first_node in first_list:
+            if first_node.next.val == second_val:
+                second_node = first_node.next
+                prev_node, next_node = first_node.prev, second_node.next
+                res.extend([(prev_node.val, first_node.val), (second_node.val, next_node.val)])
+                node = _Node(first_node.val + second_node.val)
+                prev_node.next = node
+                next_node.prev = node
+                del first_node
+                del second_node
+        
+        return res
+
+
+
+    
+
+
+
+        
+
 def find_special_tokens(file_path: str) -> list[str]:
     with open(file_path, 'r', encoding="utf-8") as f:
         text = f.read()
