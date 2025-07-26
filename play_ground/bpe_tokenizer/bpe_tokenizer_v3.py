@@ -50,6 +50,7 @@ class IndexLinkedList:
         self.dll = DoublyLinkedList()
     
     def put(self, val):
+        # val 是 None，表示断开
         node = _Node(val)
         self.dll.append_tail(node)
         if val not in self.map:
@@ -74,14 +75,11 @@ class IndexLinkedList:
                 del second_node
         
         return res
-
-
-
     
+    def get_head_node(self):
+        return self.dll.head
 
 
-
-        
 
 def find_special_tokens(file_path: str) -> list[str]:
     with open(file_path, 'r', encoding="utf-8") as f:
@@ -140,14 +138,22 @@ def pre_tokenization(chunk: bytes) -> list[bytes]:
     return bytes_blocks
 
 def convert_to_vocab(blocks: list[Token]) -> TokenGroupList:
-    return [[bytes([byte]) for byte in block] for block in blocks]
+    ill = IndexLinkedList()
+    for block in blocks:
+        for byte in block:
+            ill.put(bytes([byte]))
+        ill.put(None)
+    return ill
 
 # 优化 1.3: 使用 collections.Counter 优化计数
-def count_from_chunks(token_group_list: TokenGroupList) -> Counter:
+def count_from_chunks(ill: IndexLinkedList) -> Counter:
     counts = Counter()
-    for token_group in token_group_list:
-        # 使用 zip 可以更优雅地创建词对
-        counts.update(zip(token_group, token_group[1:]))
+    first_node, second_node = ill.get_head_node().next, ill.get_head_node().next.next
+    while first_node.val is not None or second_node.val is not None:
+        if first_node.val is not None and second_node.val is not None:
+            counts.update(first_node.val + second_node.val)
+        first_node = second_node
+        second_node = first_node.next
     return counts
 
 def get_count_and_hash(token_group_list: TokenGroupList) -> tuple[Counter, dict[tuple[Token, Token], list]]:
@@ -163,22 +169,25 @@ def get_count_and_hash(token_group_list: TokenGroupList) -> tuple[Counter, dict[
             inner_index += 1
     return counts, hash_dict
 
-def update_token_group_list(token_group_list: TokenGroupList, max_pair: tuple[Token, Token]) -> TokenGroupList:
-    new_token_group_list = []
-    new_token = max_pair[0] + max_pair[1]
+def update_ill(ill: IndexLinkedList, count: Counter, max_pair: tuple[Token, Token]) -> TokenGroupList:
+    first_val = max_pair[0]
+    second_val = max_pair[1]
+    merged_val = max_pair[0] + max_pair[1]
+    first_list = ill.map[first_val]
+    for first_node in first_list:
+        if first_node.next.val == second_val:
+            second_node = first_node.next
+            prev_node, next_node = first_node.prev, second_node.next
+            count.subtract([prev_node.val + first_node.val, second_node.val + next_node.val])
+            count.update([prev_node.val + merged_val, merged_val + next_node.val])
+            node = _Node(merged_val)
+            prev_node.next = node
+            next_node.prev = node
+            del first_node
+            del second_node
     
-    for token_group in token_group_list:
-        new_group = []
-        i = 0
-        while i < len(token_group):
-            if i < len(token_group) - 1 and (token_group[i], token_group[i+1]) == max_pair:
-                new_group.append(new_token)
-                i += 2
-            else:
-                new_group.append(token_group[i])
-                i += 1
-        new_token_group_list.append(new_group)
-    return new_token_group_list
+    return [ill, count]
+    
 
 def update_pair_count_and_token_group_list_batch(
         count: Counter, 
@@ -227,14 +236,13 @@ def run_train_bpe(
 
     with multiprocessing.Pool() as pool:
         words = pool.map(pre_tokenization, chunks)
-        token_group_list_batch = pool.map(convert_to_vocab, words)
+        ills = pool.map(convert_to_vocab, words)
 
-        token_group_list = sum(token_group_list_batch, [])
-        
+        # 使用 pool.map 高效并行处理
+        all_counts = pool.map(count_from_chunks, ills)
+
         num_merges = vocab_size - len(vocab)
         for i in tqdm(range(num_merges), desc="Training BPE"):
-            # 使用 pool.map 高效并行处理
-            all_counts, hash_dicts = pool.map(get_count_and_hash, token_group_list_batch)
             
             # 优化 1.3: 使用 Counter 高效聚合结果
             total_counts = sum(all_counts, Counter())
@@ -250,9 +258,15 @@ def run_train_bpe(
             merges.append(max_pair)
 
             # 并行更新 token 列表
-            args_for_starmap = zip(all_counts, hash_dicts, token_group_list_batch, repeat(max_pair))
+            args_for_starmap = zip(all_counts, ills, repeat(max_pair))
             # starmap 会自动解包元组，将元素作为独立参数传入
-            token_group_list_batch = pool.starmap(update_pair_count_and_token_group_list_batch, args_for_starmap)
+            results = pool.starmap(update_ill, args_for_starmap)
+            all_counts = []
+            ills = []
+            for ill, count in results:
+                all_counts.append(count)
+                ills.append(ill)
+
 
     print(f"\nFinal vocab size: {len(vocab)}")
     return vocab, merges
