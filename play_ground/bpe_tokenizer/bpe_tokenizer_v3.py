@@ -32,9 +32,9 @@ class DoublyLinkedList:
     def append_tail(self, node):
         last = self.tail.prev
         last.next = self.tail.prev = node
-        node.prev = node.next = last, self.tail
+        node.prev, node.next = last, self.tail
     
-    def remove(node):
+    def remove(self, node):
         node.prev.next, node.next.prev = node.next, node.prev
 
     def pop_head(self):
@@ -48,6 +48,7 @@ class IndexLinkedList:
     def __init__(self):
         self.map = {}
         self.dll = DoublyLinkedList()
+        self.length = 0
     
     def put(self, val):
         # val 是 None，表示断开
@@ -56,28 +57,29 @@ class IndexLinkedList:
         if val not in self.map:
             self.map[val] = []
         self.map[val].append(node)
+        self.length += 1
 
     def get_nodes_by_value(self, val):
         return self.map[val]
     
-    def merge_vocab(self, first_val, second_val):
-        res = []
-        first_list = self.map[first_val]
-        for first_node in first_list:
-            if first_node.next.val == second_val:
-                second_node = first_node.next
-                prev_node, next_node = first_node.prev, second_node.next
-                res.extend([(prev_node.val, first_node.val), (second_node.val, next_node.val)])
-                node = _Node(first_node.val + second_node.val)
-                prev_node.next = node
-                next_node.prev = node
-                del first_node
-                del second_node
-        
-        return res
+    def insert_between(self, first_node, second_node, new_val):
+        node = _Node(new_val)
+        if new_val not in self.map:
+            self.map[new_val] = []
+        self.map[new_val].append(node)
+        while first_node.next != second_node:
+            cur_node = first_node.next
+            self.dll.remove(cur_node)
+            self.map.get(cur_node.val, []).remove(cur_node)
+            self.length -= 1
+        first_node.next = second_node.prev = node
+
     
     def get_head_node(self):
         return self.dll.head
+    
+    def get_length(self):
+        return self.length
 
 
 
@@ -151,7 +153,8 @@ def count_from_chunks(ill: IndexLinkedList) -> Counter:
     first_node, second_node = ill.get_head_node().next, ill.get_head_node().next.next
     while first_node.val is not None or second_node.val is not None:
         if first_node.val is not None and second_node.val is not None:
-            counts.update(first_node.val + second_node.val)
+            merge_val = first_node.val + second_node.val
+            counts.update([merge_val])
         first_node = second_node
         second_node = first_node.next
     return counts
@@ -170,22 +173,28 @@ def get_count_and_hash(token_group_list: TokenGroupList) -> tuple[Counter, dict[
     return counts, hash_dict
 
 def update_ill(ill: IndexLinkedList, count: Counter, max_pair: tuple[Token, Token]) -> TokenGroupList:
-    first_val = max_pair[0]
-    second_val = max_pair[1]
-    merged_val = max_pair[0] + max_pair[1]
+    first_val = bytes([max_pair[0]])
+    second_val =  bytes([max_pair[1]])
+    merged_val = first_val + second_val
+    print(f"merged_val:{merged_val}")
     first_list = ill.map[first_val]
     for first_node in first_list:
         if first_node.next.val == second_val:
             second_node = first_node.next
             prev_node, next_node = first_node.prev, second_node.next
-            count.subtract([prev_node.val + first_node.val, second_node.val + next_node.val])
-            count.update([prev_node.val + merged_val, merged_val + next_node.val])
-            node = _Node(merged_val)
-            prev_node.next = node
-            next_node.prev = node
-            del first_node
-            del second_node
-    
+            # print(prev_node.val, first_node.val, second_node.val, next_node.val)
+            if prev_node.val:
+                del_prev = prev_node.val + first_node.val
+                add_prev = prev_node.val + merged_val
+                count.subtract([del_prev])
+                count.update([add_prev])
+            if next_node.val:
+                del_next = second_node.val + next_node.val
+                add_next = merged_val + next_node.val
+                count.subtract([del_next])
+                count.update([add_next])
+            ill.insert_between(prev_node, next_node, merged_val)
+ 
     return [ill, count]
     
 
@@ -234,42 +243,27 @@ def run_train_bpe(
     vocab[256] = special_split_token
     merges = []
 
-    with multiprocessing.Pool() as pool:
-        words = pool.map(pre_tokenization, chunks)
-        ills = pool.map(convert_to_vocab, words)
-
+    for chunk in chunks:
+        ill = convert_to_vocab(pre_tokenization(chunk))
         # 使用 pool.map 高效并行处理
-        all_counts = pool.map(count_from_chunks, ills)
+        count = count_from_chunks(ill)
 
         num_merges = vocab_size - len(vocab)
         for i in tqdm(range(num_merges), desc="Training BPE"):
-            
-            # 优化 1.3: 使用 Counter 高效聚合结果
-            total_counts = sum(all_counts, Counter())
+            print(ill.get_length())
 
-            if not total_counts:
-                print("No more pairs to merge.")
-                break
 
             # 优化 2.3: 使用 max() 和 key 简化查找
-            max_pair = max(total_counts, key=total_counts.get)
+            max_pair = max(count, key=count.get)
             
             vocab[len(vocab)] = max_pair[0] + max_pair[1]
             merges.append(max_pair)
 
-            # 并行更新 token 列表
-            args_for_starmap = zip(all_counts, ills, repeat(max_pair))
-            # starmap 会自动解包元组，将元素作为独立参数传入
-            results = pool.starmap(update_ill, args_for_starmap)
-            all_counts = []
-            ills = []
-            for ill, count in results:
-                all_counts.append(count)
-                ills.append(ill)
+            ill, count = update_ill(ill, count, max_pair)
 
 
-    print(f"\nFinal vocab size: {len(vocab)}")
-    return vocab, merges
+        print(f"\nFinal vocab size: {len(vocab)}")
+        return vocab, merges
 
 if __name__ == '__main__':
     # 确保在 if __name__ == '__main__': 下运行，这是 multiprocessing 的最佳实践
