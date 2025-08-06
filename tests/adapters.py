@@ -566,13 +566,89 @@ from tqdm import tqdm
 import regex as re
 import multiprocessing
 from itertools import repeat
-from collections import Counter
+from collections import Counter, deque
+import time
 
 # 优化 2.2: 使用 TypeAlias 增加代码可读性
 Token = bytes
 TokenGroup = list[Token]
 TokenGroupList = list[TokenGroup]
 TokenGroupBatch = list[TokenGroupList]
+
+class _Node:
+    __slots__ = ("val", "prev", "next")
+    def __init__(self, val=None):
+        self.val = val
+        self.prev = self.next = None
+
+class DoublyLinkedList:
+    def __init__(self):
+        self.head, self.tail = _Node(), _Node()
+        self.head.next, self.tail.prev = self.tail, self.head
+
+    def append_tail(self, node):
+        last = self.tail.prev
+        last.next = self.tail.prev = node
+        node.prev, node.next = last, self.tail
+    
+    def remove(self, node):
+        node.prev.next, node.next.prev = node.next, node.prev
+
+    def pop_head(self):
+        if self.head.next is self.tail:
+            return None
+        node = self.head.next
+        self.remove(node)
+        return node
+
+class IndexLinkedList:
+    def __init__(self):
+        self.map = {}
+        self.dll = DoublyLinkedList()
+        self.length = 0
+    
+    def put(self, val):
+        # val 是 None，表示断开
+        node = _Node(val)
+        self.dll.append_tail(node)
+        if val not in self.map:
+            self.map[val] = []
+        self.map[val].append(node)
+        self.length += 1
+
+    def get_nodes_by_value(self, val):
+        return self.map[val]
+    
+    def merge_two_node(self, first_node, second_node):
+        assert first_node.next is second_node, "Merged nodes must be adjacent"
+        assert first_node is not self.dll.head and second_node is not self.dll.tail, "Cannot merge with sentinel nodes"
+        merge_val = first_node.val + second_node.val
+        node = _Node(merge_val)
+        node.prev, node.next = first_node.prev, second_node.next
+        first_node.prev.next = second_node.next.prev = node
+        if merge_val not in self.map:
+            self.map[merge_val] = []
+        self.map[merge_val].append(node)
+        
+        # delete node
+        val1_nodes = self.map[first_node.val]
+        val1_nodes.remove(first_node)
+        if not val1_nodes:  # 如果列表空了
+            del self.map[first_node.val] # 就从 map 中移除这个键
+        val2_nodes = self.map[second_node.val]
+        val2_nodes.remove(second_node)
+        if not val2_nodes:
+            del self.map[second_node.val]
+        self.length -= 1
+
+    
+    def get_head_node(self):
+        return self.dll.head
+    
+    def get_length(self):
+        return self.length
+
+
 
 def find_special_tokens(file_path: str) -> list[str]:
     with open(file_path, 'r', encoding="utf-8") as f:
@@ -583,7 +659,7 @@ def find_special_tokens(file_path: str) -> list[str]:
 def find_chunk_boundaries(
             file: BinaryIO,
             desired_num_chunks: int,
-            special_split_token: bytes
+            special_split_tokens: list[bytes]
     ) -> list[int]:
         
     file.seek(0, os.SEEK_END)
@@ -608,7 +684,11 @@ def find_chunk_boundaries(
                 chunk_boundaries[i] = file_size
                 break
             
-            found_at = mini_chunk.find(special_split_token)
+            found_at = -1
+            for token in special_split_tokens:
+                temp_found = mini_chunk.find(token)
+                if temp_found != -1 and found_at != -1 and temp_found < found_at:
+                    found_at = temp_found
             if found_at != -1:
                 chunk_boundaries[i] = inital_position + found_at
                 break
@@ -617,32 +697,90 @@ def find_chunk_boundaries(
 
     return sorted(set(chunk_boundaries))
 
+def pre_tokenization(chunk: bytes, special_tokens) -> list[bytes]:
 
-def pre_tokenization(chunk: bytes) -> list[bytes]:
-
-    special_split_token_pat = r'<\|endoftext\|>'
+    special_split_token_pat =  '|'.join([re.escape(token) for token in special_tokens])
     pat = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+|<\|endoftext\|>"""
     
     text_chunk = chunk.decode("utf-8")
     splited_chunks = re.split(special_split_token_pat, text_chunk)
-    blocks = []
+    words = []
     for splited_chunk in splited_chunks:
-        blocks.extend(re.findall(pat, splited_chunk))
-    bytes_blocks = [block.encode("utf-8") for block in blocks]
-    return bytes_blocks
+        words.extend(re.findall(pat, splited_chunk))
+    bytes_words = [word.encode() for word in words]
+    return bytes_words
 
-def convert_to_vocab(blocks: list[Token]) -> TokenGroupList:
-    return [[bytes([byte]) for byte in block] for block in blocks]
+def convert_and_count(words: list[Token]) -> tuple[TokenGroupList, Counter]:
+    ill = IndexLinkedList()
+    counts = Counter()
+    for word in words:
+        for byte, byte_second in zip(word, word[1:]):
+            byte = bytes([byte])
+            byte_second = bytes([byte_second])
+            ill.put(byte)
+            merge_val = (byte, byte_second)
+            # print(merge_val)
+            counts.update([merge_val])
+        # print('\n')
+        ill.put(bytes([word[-1]]))
+        ill.put(None)
+    return ill, counts
 
 # 优化 1.3: 使用 collections.Counter 优化计数
-def count_from_chunks(token_group_list: TokenGroupList) -> Counter:
+def count_from_chunks(ill: IndexLinkedList) -> Counter:
     counts = Counter()
-    for token_group in token_group_list:
-        # 使用 zip 可以更优雅地创建词对
-        counts.update(zip(token_group, token_group[1:]))
+    first_node, second_node = ill.get_head_node().next, ill.get_head_node().next.next
+    while first_node.val is not None or second_node.val is not None:
+        if first_node.val is not None and second_node.val is not None:
+            merge_val = (first_node.val, second_node.val)
+            counts.update([merge_val])
+        first_node = second_node
+        second_node = first_node.next
     return counts
 
-def update_token_group_list(token_group_list: TokenGroupList, max_pair: tuple[Token, Token]) -> TokenGroupList:
+def get_count_and_hash(token_group_list: TokenGroupList) -> tuple[Counter, dict[tuple[Token, Token], list]]:
+    counts = Counter()
+    hash_dict = {}
+    for group_idx, token_group in enumerate(token_group_list):
+        inner_index = 0
+        for pre, latter in zip(token_group[:-1], token_group[1:]):
+            counts[(pre, latter)] += 1
+            if (pre, latter) not in hash_dict:
+                hash_dict[(pre, latter)] = []
+            hash_dict[(pre, latter)].append(group_idx, inner_index)
+            inner_index += 1
+    return counts, hash_dict
+
+def update_ill(ill: IndexLinkedList, count: Counter, max_pair: tuple[Token, Token]) -> TokenGroupList:
+    first_val = max_pair[0]
+    second_val =  max_pair[1]
+    merged_val = first_val + second_val
+    del count[(first_val, second_val)]
+    first_list = ill.map[first_val]
+    for first_node in first_list:
+        if first_node.next is not None and first_node.next.val == second_val:
+            second_node = first_node.next
+            prev_node, next_node = first_node.prev, second_node.next
+            if prev_node.val:
+                del_prev = (prev_node.val, first_node.val)
+                add_prev = (prev_node.val, merged_val)
+                count.subtract([del_prev])
+                count.update([add_prev])
+            if next_node.val:
+                del_next = (second_node.val, next_node.val)
+                add_next = (merged_val, next_node.val)
+                count.subtract([del_next])
+                count.update([add_next])
+            ill.merge_two_node(first_node, second_node)
+    return ill, count
+    
+
+def update_pair_count_and_token_group_list_batch(
+        count: Counter, 
+        hash_dict: dict[tuple[Token, Token], list],
+        token_group_list: TokenGroupList,
+        max_pair: tuple[Token, Token]) -> TokenGroupList:
+    hash_dict
     new_token_group_list = []
     new_token = max_pair[0] + max_pair[1]
     
@@ -686,14 +824,13 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    desired_num_chunks = 8
-    special_split_token = "<|endoftext|>".encode("utf-8")
-
+    
     desired_num_chunks = multiprocessing.cpu_count()  # 使用CPU核心数作为默认分块数
-    special_split_token = b"<|endoftext|>"
+    # desired_num_chunks = 10  # 使用CPU核心数作为默认分块数
+    special_tokens_bytes = [s.encode("utf-8") for s in special_tokens]
 
     with open(input_path, 'rb') as f:
-        chunk_boundaries = find_chunk_boundaries(f, desired_num_chunks, special_split_token)
+        chunk_boundaries = find_chunk_boundaries(f, desired_num_chunks, special_tokens_bytes)
         chunks = []
         for i in range(len(chunk_boundaries) - 1):
             start, end = chunk_boundaries[i], chunk_boundaries[i+1]
@@ -701,42 +838,25 @@ def run_train_bpe(
             chunks.append(f.read(end - start))
 
     vocab = {i: bytes([i]) for i in range(256)}
-    vocab[256] = special_split_token
+    for i, special_token_bytes in enumerate(special_tokens_bytes):
+        vocab[256+i] = special_token_bytes
     merges = []
+    with multiprocessing.Pool(desired_num_chunks) as pool:
+        args_for_starmap = zip(chunks, repeat(special_tokens))
+        results = pool.starmap(pre_tokenization, args_for_starmap)
+    words = []
+    for result in results:
+        words.extend(result)
+    ill, count = convert_and_count(words)
+    num_merges = vocab_size - len(vocab)
+    for i in tqdm(range(num_merges), desc="Training BPE"):
 
-    # 初始化分词
-    token_group_list_batch = [convert_to_vocab(pre_tokenization(chunk)) for chunk in chunks]
-    
-    # 优化 1.1: 在循环外创建并复用进程池
-    with multiprocessing.Pool() as pool:
-        num_merges = vocab_size - len(vocab)
-        for i in tqdm(range(num_merges), desc="Training BPE"):
-            # 并行计数
-            # 使用 pool.map 高效并行处理
-            all_counts = pool.map(count_from_chunks, token_group_list_batch)
-            
-            # 优化 1.3: 使用 Counter 高效聚合结果
-            total_counts = sum(all_counts, Counter())
-
-            if not total_counts:
-                print("No more pairs to merge.")
-                break
-
-            # 优化 2.3: 使用 max() 和 key 简化查找
-            max_pair = max(total_counts, key=total_counts.get)
-            
-            vocab[len(vocab)] = max_pair[0] + max_pair[1]
-            merges.append(max_pair)
-
-            # 并行更新 token 列表
-            args_for_starmap = zip(token_group_list_batch, repeat(max_pair))
-            # starmap 会自动解包元组，将元素作为独立参数传入
-            token_group_list_batch = pool.starmap(update_token_group_list, args_for_starmap)
-
-    # print(f"\nFinal vocab size: {len(vocab)}")
+        max_pair =  max(count, key=lambda k: (count.get(k), k))
+        vocab[len(vocab)] = max_pair[0] + max_pair[1]
+        merges.append(max_pair)
+        ill, count = update_ill(ill, count, max_pair)
     return vocab, merges
     
-
     
 
     # raise NotImplementedError
